@@ -55,59 +55,41 @@ export class DQNAgent {
     async train(batchSize) {
         if (this.memory.length < batchSize) return;
 
-        const batch = [];
-        // Random sampling
-        for (let i = 0; i < batchSize; i++) {
-            const idx = Math.floor(Math.random() * this.memory.length);
-            batch.push(this.memory[idx]);
-        }
+        const batch = this.memory
+            .sort(() => Math.random() - 0.5)
+            .slice(0, batchSize);
 
-        const states = batch.map(x => x.state);
-        const nextStates = batch.map(x => x.nextState);
+        await tf.tidy(async () => {
+            const states = tf.tensor2d(batch.map(m => m.state));
+            const nextStates = tf.tensor2d(batch.map(m => m.nextState));
 
-        const tfStates = tf.tensor2d(states);
-        const tfNextStates = tf.tensor2d(nextStates);
+            const qCurrent = this.model.predict(states);
+            const qNext = this.model.predict(nextStates);
 
-        const qCurrent = this.model.predict(tfStates);
-        const qNext = this.model.predict(tfNextStates);
+            const qCurrentData = await qCurrent.array();
+            const qNextData = await qNext.array();
 
-        const x = [];
-        const y = [];
+            const x = [];
+            const y = [];
 
-        // We need to fetch data from tensors to manipulate them easily in JS
-        // For performance in a real loop, we might want to keep things in tensors, 
-        // but for this scale, dataSync is acceptable or we use arraySync.
-        const qCurrentData = await qCurrent.array();
-        const qNextData = await qNext.array();
+            batch.forEach((exp, i) => {
+                let target = exp.reward;
+                if (!exp.done) {
+                    const maxQ = Math.max(...qNextData[i]);
+                    target += this.gamma * maxQ;
+                }
 
-        for (let i = 0; i < batchSize; i++) {
-            const { state, action, reward, nextState, done } = batch[i];
-            let target = reward;
-            if (!done) {
-                target = reward + this.gamma * Math.max(...qNextData[i]);
-            }
+                const targetF = qCurrentData[i].slice();
+                targetF[exp.action] = target;
+                x.push(exp.state);
+                y.push(targetF);
+            });
 
-            const targetVec = qCurrentData[i].slice();
-            targetVec[action] = target;
-
-            x.push(state);
-            y.push(targetVec);
-        }
-
-        const xTensor = tf.tensor2d(x);
-        const yTensor = tf.tensor2d(y);
-
-        await this.model.fit(xTensor, yTensor, {
-            epochs: 1,
-            verbose: 0
+            await this.model.fit(tf.tensor2d(x), tf.tensor2d(y), {
+                epochs: 1,
+                verbose: 0
+            });
         });
-
-        xTensor.dispose();
-        yTensor.dispose();
-        tfStates.dispose();
-        tfNextStates.dispose();
-        qCurrent.dispose();
-        qNext.dispose();
 
         if (this.epsilon > this.epsilonMin) {
             this.epsilon *= this.epsilonDecay;
