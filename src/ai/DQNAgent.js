@@ -8,7 +8,7 @@ export class DQNAgent {
         this.gamma = 0.95;
         this.epsilon = 1.0;
         this.epsilonMin = 0.01;
-        this.epsilonDecay = 0.999; // Slower by default
+        this.epsilonDecay = 0.995;
         this.learningRate = 0.001;
         this.model = this._buildModel();
     }
@@ -33,66 +33,65 @@ export class DQNAgent {
         return tf.tidy(() => {
             const tensor = tf.tensor2d([state]);
             const prediction = this.model.predict(tensor);
-            const action = prediction.argMax(-1).dataSync()[0];
-            tensor.dispose();
-            prediction.dispose();
-            return action;
+            return prediction.argMax(-1).dataSync()[0];
         });
     }
 
     remember(state, action, reward, nextState, done) {
-        this.memory.push({ state, action, reward, nextState, done });
-        if (this.memory.length > 10000) {
+        // Limit memory size to prevent browser crash
+        if (this.memory.length > 50000) {
             this.memory.shift();
         }
+        this.memory.push({ state, action, reward, nextState, done });
     }
 
     async train(batchSize = 64) {
         if (this.memory.length < batchSize) return;
 
-        // Sample batch WITHOUT duplicates
-        const indices = new Set();
-        while (indices.size < batchSize && indices.size < this.memory.length) {
-            indices.add(Math.floor(Math.random() * this.memory.length));
+        // Sample batch
+        const batch = [];
+        for (let i = 0; i < batchSize; i++) {
+            const idx = Math.floor(Math.random() * this.memory.length);
+            batch.push(this.memory[idx]);
         }
-        const batch = Array.from(indices).map(i => this.memory[i]);
 
         const states = batch.map(b => b.state);
-        const actions = batch.map(b => b.action);
-        const rewards = batch.map(b => b.reward);
         const nextStates = batch.map(b => b.nextState);
-        const dones = batch.map(b => b.done);
 
-        const statesTensor = tf.tensor2d(states);
+        // Operations inside tidy to prevent tensor leaks
+        const { statesTensor, targetData } = tf.tidy(() => {
+            const statesTensor = tf.tensor2d(states);
+            const nextStatesTensor = tf.tensor2d(nextStates);
 
-        // Compute targets in tidy (SAFE!)
-        const targetData = tf.tidy(() => {
             const currentQs = this.model.predict(statesTensor);
-            const nextQs = this.model.predict(tf.tensor2d(nextStates));
-            const nextQsMax = nextQs.max(-1);
+            const nextQs = this.model.predict(nextStatesTensor);
+            const nextQsMax = nextQs.max(-1).dataSync(); // Sync needed for JS mapping logic
 
             const currentQsData = currentQs.arraySync();
-            const nextQsMaxData = nextQsMax.arraySync();
 
+            // Update Q values with Bellman equation
             const targets = currentQsData.map((qValues, i) => {
-                let target = rewards[i];
-                if (!dones[i]) {
-                    target += this.gamma * nextQsMaxData[i];
+                const { action, reward, done } = batch[i];
+                let target = reward;
+                if (!done) {
+                    target = reward + this.gamma * nextQsMax[i];
                 }
-                qValues[actions[i]] = target;
+                qValues[action] = target;
                 return qValues;
             });
 
-            return targets; // JS array only
+            return { statesTensor: tf.keep(statesTensor), targetData: targets };
         });
 
-        // Train outside tidy
+        // Fit the model
         const targetsTensor = tf.tensor2d(targetData);
         await this.model.fit(statesTensor, targetsTensor, { epochs: 1, verbose: 0 });
+
+        // Explicit clean up of tensors kept/created outside tidy
         statesTensor.dispose();
         targetsTensor.dispose();
 
-        // Slow epsilon decay
+        // Decay epsilon
         if (this.epsilon > this.epsilonMin) {
             this.epsilon *= this.epsilonDecay;
         }

@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { PlayScene } from './scenes/PlayScene';
+import { PlayScene } from './scenes/PlayScene.js';
 
 window.addEventListener('click', function unlockAudio() {
   Phaser.Sound.WebAudioSoundContext?.unlock();
@@ -15,7 +15,7 @@ const config = {
     default: 'arcade',
     arcade: {
       gravity: { y: 0 },
-      debug: false
+      debug: true
     }
   },
   scene: [PlayScene]
