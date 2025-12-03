@@ -5,32 +5,23 @@ export class DQNAgent {
         this.stateSize = stateSize;
         this.actionSize = actionSize;
         this.memory = [];
-        this.gamma = 0.95;    // discount rate
-        this.epsilon = 1.0;   // exploration rate
+        this.gamma = 0.95;
+        this.epsilon = 1.0;
         this.epsilonMin = 0.01;
-        this.epsilonDecay = 0.995;
+        this.epsilonDecay = 0.999; // Slower by default
         this.learningRate = 0.001;
         this.model = this._buildModel();
     }
 
     _buildModel() {
         const model = tf.sequential();
-        model.add(tf.layers.dense({
-            units: 24,
-            inputShape: [this.stateSize],
-            activation: 'relu'
-        }));
-        model.add(tf.layers.dense({
-            units: 24,
-            activation: 'relu'
-        }));
-        model.add(tf.layers.dense({
-            units: this.actionSize,
-            activation: 'linear'
-        }));
+        model.add(tf.layers.dense({ units: 64, inputShape: [this.stateSize], activation: 'relu' }));
+        model.add(tf.layers.dense({ units: 64, activation: 'relu' }));
+        model.add(tf.layers.dense({ units: 32, activation: 'relu' }));
+        model.add(tf.layers.dense({ units: this.actionSize, activation: 'linear' }));
         model.compile({
-            loss: 'meanSquaredError',
-            optimizer: tf.train.adam(this.learningRate)
+            optimizer: tf.train.adam(this.learningRate),
+            loss: 'meanSquaredError'
         });
         return model;
     }
@@ -40,57 +31,68 @@ export class DQNAgent {
             return Math.floor(Math.random() * this.actionSize);
         }
         return tf.tidy(() => {
-            const qs = this.model.predict(tf.tensor2d([state]));
-            return qs.argMax(1).dataSync()[0];
+            const tensor = tf.tensor2d([state]);
+            const prediction = this.model.predict(tensor);
+            const action = prediction.argMax(-1).dataSync()[0];
+            tensor.dispose();
+            prediction.dispose();
+            return action;
         });
     }
 
     remember(state, action, reward, nextState, done) {
         this.memory.push({ state, action, reward, nextState, done });
-        if (this.memory.length > 2000) {
+        if (this.memory.length > 10000) {
             this.memory.shift();
         }
     }
 
-    async train(batchSize) {
+    async train(batchSize = 64) {
         if (this.memory.length < batchSize) return;
 
-        const batch = this.memory
-            .sort(() => Math.random() - 0.5)
-            .slice(0, batchSize);
+        // Sample batch WITHOUT duplicates
+        const indices = new Set();
+        while (indices.size < batchSize && indices.size < this.memory.length) {
+            indices.add(Math.floor(Math.random() * this.memory.length));
+        }
+        const batch = Array.from(indices).map(i => this.memory[i]);
 
-        await tf.tidy(async () => {
-            const states = tf.tensor2d(batch.map(m => m.state));
-            const nextStates = tf.tensor2d(batch.map(m => m.nextState));
+        const states = batch.map(b => b.state);
+        const actions = batch.map(b => b.action);
+        const rewards = batch.map(b => b.reward);
+        const nextStates = batch.map(b => b.nextState);
+        const dones = batch.map(b => b.done);
 
-            const qCurrent = this.model.predict(states);
-            const qNext = this.model.predict(nextStates);
+        const statesTensor = tf.tensor2d(states);
 
-            const qCurrentData = await qCurrent.array();
-            const qNextData = await qNext.array();
+        // Compute targets in tidy (SAFE!)
+        const targetData = tf.tidy(() => {
+            const currentQs = this.model.predict(statesTensor);
+            const nextQs = this.model.predict(tf.tensor2d(nextStates));
+            const nextQsMax = nextQs.max(-1);
 
-            const x = [];
-            const y = [];
+            const currentQsData = currentQs.arraySync();
+            const nextQsMaxData = nextQsMax.arraySync();
 
-            batch.forEach((exp, i) => {
-                let target = exp.reward;
-                if (!exp.done) {
-                    const maxQ = Math.max(...qNextData[i]);
-                    target += this.gamma * maxQ;
+            const targets = currentQsData.map((qValues, i) => {
+                let target = rewards[i];
+                if (!dones[i]) {
+                    target += this.gamma * nextQsMaxData[i];
                 }
-
-                const targetF = qCurrentData[i].slice();
-                targetF[exp.action] = target;
-                x.push(exp.state);
-                y.push(targetF);
+                qValues[actions[i]] = target;
+                return qValues;
             });
 
-            await this.model.fit(tf.tensor2d(x), tf.tensor2d(y), {
-                epochs: 1,
-                verbose: 0
-            });
+            return targets; // JS array only
         });
 
+        // Train outside tidy
+        const targetsTensor = tf.tensor2d(targetData);
+        await this.model.fit(statesTensor, targetsTensor, { epochs: 1, verbose: 0 });
+        statesTensor.dispose();
+        targetsTensor.dispose();
+
+        // Slow epsilon decay
         if (this.epsilon > this.epsilonMin) {
             this.epsilon *= this.epsilonDecay;
         }

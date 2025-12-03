@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { DQNAgent } from '../ai/DQNAgent';
+import { DQNAgent } from '../ai/DQNAgent.js';
 
 export class PlayScene extends Phaser.Scene {
     constructor() {
@@ -8,170 +8,151 @@ export class PlayScene extends Phaser.Scene {
         this.episode = 0;
         this.score = 0;
         this.highScore = 0;
+        this.lastScore = 0;
         this.gameSpeed = 200;
         this.pipeGap = 150;
-        this.pipeFrequency = 1500;
-        this.lastPipeX = 0;
-        this.passedPipes = new Set();
+        this.pipeFrequency = 1600;
         this.gameOver = false;
+        this.totalSteps = 0;
+        this.pipeTimer = null;
     }
 
     create() {
+        this.add.rectangle(400, 300, 800, 600, 0x87CEEB);
+
         this.agent = new DQNAgent(4, 2);
+        this.agent.epsilonDecay = 0.9999; // Very slow decay — crucial for learning
 
         this.createGameObjects();
         this.setupCollisions();
         this.createUI();
 
-        this.resetGame();
+        this.resetGame(); // This will spawn first pipe immediately
     }
 
     createGameObjects() {
-        // Background
-        this.add.rectangle(400, 300, 800, 600, 0x87CEEB);
-
-        // Bird
         this.bird = this.add.image(100, 300, '__WHITE')
             .setDisplaySize(40, 30)
             .setTint(0xffd700)
             .setOrigin(0.5);
-
         this.physics.add.existing(this.bird);
         this.bird.body.setGravityY(1000);
         this.bird.body.setSize(34, 24);
 
-        // Pipes group
         this.pipes = this.physics.add.group();
+        this.scoreTriggers = this.physics.add.group();
 
-        // Ground (invisible death zone)
-        const ground = this.add.rectangle(400, 620, 800, 80, 0x8B4513);
-        this.physics.add.existing(ground, true); // static
+        // Ground
+        const ground = this.add.rectangle(400, 620, 800, 80, 0x90EE90).setAlpha(0.3);
+        this.physics.add.existing(ground, true);
         this.physics.add.collider(this.bird, ground, this.hitPipe, null, this);
-
-        this.physics.add.collider(this.bird, ground, this.hitPipe, null, this);
-
-        // Spawn pipes
-        this.pipeTimer = this.time.addEvent({
-            delay: this.pipeFrequency,
-            callback: this.addRowOfPipes,
-            callbackScope: this,
-            loop: true
-        });
     }
 
     setupCollisions() {
         this.physics.add.overlap(this.bird, this.pipes, this.hitPipe, null, this);
+        this.physics.add.overlap(this.bird, this.scoreTriggers, this.onScore, null, this);
     }
 
     createUI() {
-        this.scoreText = this.add.text(20, 20, 'Score: 0', {
-            fontSize: '32px',
-            fill: '#000',
-            fontStyle: 'bold'
-        });
-
-        this.episodeText = this.add.text(20, 60, 'Episode: 0', { fontSize: '18px', fill: '#000' });
-        this.highScoreText = this.add.text(20, 85, 'Best: 0', { fontSize: '18px', fill: '#000' });
-        this.epsilonText = this.add.text(20, 110, 'ε: 1.000', { fontSize: '16px', fill: '#555' });
+        this.scoreText = this.add.text(20, 20, 'Score: 0', { fontSize: '36px', fill: '#000', fontStyle: 'bold' });
+        this.highScoreText = this.add.text(20, 60, 'Best: 0', { fontSize: '20px', fill: '#333' });
+        this.episodeText = this.add.text(20, 90, 'Episode: 0', { fontSize: '18px', fill: '#666' });
+        this.epsilonText = this.add.text(20, 115, 'ε: 1.000', { fontSize: '16px', fill: '#888' });
     }
 
+    // Normal random pipes (called by timer)
     addRowOfPipes() {
-        const gapY = Phaser.Math.Between(150, 450); // Center of gap
+        this.spawnPipePair(Phaser.Math.Between(160, 440));
+    }
+
+    // Reusable function — used for first pipe AND timer
+    spawnPipePair(gapY) {
         const pipeWidth = 70;
 
         // Top pipe
-        const topPipe = this.pipes.create(850, gapY - this.pipeGap / 2, null)
-            .setSize(pipeWidth, gapY - this.pipeGap / 2)
-            .setOrigin(0.5, 1);
+        const topPipe = this.pipes.create(850, gapY - this.pipeGap / 2, '__WHITE')
+            .setOrigin(0.5, 1)
+            .setDisplaySize(pipeWidth, gapY - this.pipeGap / 2)
+            .setTint(0x228B22);
         topPipe.body.setVelocityX(-this.gameSpeed);
         topPipe.body.allowGravity = false;
         topPipe.body.immovable = true;
-        topPipe.isTop = true;
         topPipe.gapY = gapY;
-
-        this.add.rectangle(topPipe.x, topPipe.y, pipeWidth, topPipe.height * 2, 0x00ff00);
 
         // Bottom pipe
         const bottomY = gapY + this.pipeGap / 2;
-        const bottomPipe = this.pipes.create(850, bottomY, null)
-            .setSize(pipeWidth, 600 - bottomY)
-            .setOrigin(0.5, 0);
+        const bottomPipe = this.pipes.create(850, bottomY, '__WHITE')
+            .setOrigin(0.5, 0)
+            .setDisplaySize(pipeWidth, 600 - bottomY)
+            .setTint(0x228B22);
         bottomPipe.body.setVelocityX(-this.gameSpeed);
         bottomPipe.body.allowGravity = false;
         bottomPipe.body.immovable = true;
-        bottomPipe.gapY = gapY; // Shared!
-        bottomPipe.pairId = topPipe; // Link them
+        bottomPipe.gapY = gapY;
 
-        this.add.rectangle(bottomPipe.x, bottomPipe.y + bottomPipe.height / 2, pipeWidth, bottomPipe.height * 2, 0x00ff00);
-
-        // Score trigger (invisible)
-        const scoreTrigger = this.physics.add.sprite(850, gapY, null)
-            .setSize(10, this.pipeGap)
+        // Score trigger
+        const trigger = this.scoreTriggers.create(850, gapY, '__WHITE')
+            .setDisplaySize(1, 1)
             .setVisible(false);
-        scoreTrigger.body.setVelocityX(-this.gameSpeed);
-        scoreTrigger.body.allowGravity = false;
-        scoreTrigger.gapY = gapY;
-        this.physics.add.overlap(this.bird, scoreTrigger, () => {
-            if (!this.passedPipes.has(scoreTrigger)) {
-                this.passedPipes.add(scoreTrigger);
-                this.score++;
-                this.scoreText.setText('Score: ' + this.score);
-                if (this.score > this.highScore) {
-                    this.highScore = this.score;
-                    this.highScoreText.setText('Best: ' + this.highScore);
-                }
-            }
-        }, null, this);
+        trigger.body.setSize(40, this.pipeGap);
+        trigger.body.setOffset(-20, -this.pipeGap / 2);
+        trigger.body.setVelocityX(-this.gameSpeed);
+        trigger.body.allowGravity = false;
+    }
+
+    onScore(bird, trigger) {
+        trigger.destroy();
+        this.score++;
+        this.scoreText.setText('Score: ' + this.score);
+        if (this.score > this.highScore) {
+            this.highScore = this.score;
+            this.highScoreText.setText('Best: ' + this.highScore);
+        }
     }
 
     update() {
         if (this.gameOver) return;
 
-        const state = this.getState();
-        const action = this.agent.act(state);
+        this.totalSteps++;
 
-        if (action === 1) {
-            this.jump();
+        // Death by bounds
+        if (this.bird.y < 30 || this.bird.y > 570) {
+            this.hitPipe();
+            return;
         }
 
-        // Clean up old pipes
-        this.pipes.getChildren().forEach(pipe => {
-            if (pipe.x < -100) {
-                if (pipe.pairId) pipe.pairId.destroy();
-                pipe.destroy();
-            }
-        });
+        const state = this.getState();
+        const action = this.agent.act(state);
+        if (action === 1) this.jump();
 
-        // Reward for staying alive
-        let reward = 0.1;
-
-        // Big reward for passing pipe
-        // (We'll give it in overlap callback, but also check here if needed)
+        // Cleanup
+        this.pipes.getChildren().forEach(p => p.x < -100 && p.destroy());
+        this.scoreTriggers.getChildren().forEach(t => t.x < -100 && t.destroy());
 
         const nextState = this.getState();
-        const done = this.gameOver;
+        let reward = 0.1;
+        if (this.score > this.lastScore) {
+            reward += 10.0;
+            this.lastScore = this.score;
+        }
 
+        const done = this.gameOver;
         if (done) reward = -100;
 
         this.agent.remember(state, action, reward, nextState, done);
-
-        // Train every few steps
-        if (this.time.now % 4 === 0) {
-            this.agent.train(32);
+        if (this.totalSteps % 4 === 0) {
+            this.agent.train(64);
         }
 
-        // Update UI
-        this.epsilonText.setText('ε: ' + this.agent.epsilon.toFixed(3));
+        this.epsilonText.setText('ε: ' + this.agent.epsilon.toFixed(4));
 
-        // Auto-restart after death
         if (done) {
-            this.time.delayedCall(1000, () => this.resetGame());
+            this.time.delayedCall(600, () => this.resetGame());
         }
     }
 
     jump() {
         this.bird.body.setVelocityY(-380);
-        // Optional: add flap animation/sound later
     }
 
     hitPipe() {
@@ -179,52 +160,50 @@ export class PlayScene extends Phaser.Scene {
         this.gameOver = true;
         this.physics.pause();
         this.bird.setTint(0xff0000);
-
-        // Flash effect
-        this.tweens.add({
-            targets: this.bird,
-            alpha: 0.3,
-            duration: 100,
-            yoyo: true,
-            repeat: 5
-        });
+        this.time.delayedCall(600, () => this.resetGame());
     }
 
+    // THE FIXED RESET — THIS IS THE KEY
     resetGame() {
+        console.log(`Episode ${this.episode + 1} starting...`);
+
         this.episode++;
         this.score = 0;
+        this.lastScore = 0;
         this.gameOver = false;
-        this.passedPipes.clear();
+        this.totalSteps = 0;
 
+        // Reset bird
         this.bird.clearTint();
+        this.bird.setAlpha(1);
         this.bird.setPosition(100, 300);
         this.bird.body.setVelocity(0, 0);
-        this.bird.alpha = 1;
 
+        // Full cleanup
         this.pipes.clear(true, true);
-        this.children.list
-            .filter(c => c.type === 'Sprite' && c.body && !c.body.isStatic)
-            .forEach(c => c.destroy());
+        this.scoreTriggers.clear(true, true);
+        if (this.pipeTimer) this.pipeTimer.remove();
 
         this.physics.resume();
 
-        // Start spawning pipes again
-        this.pipeTimer.reset({
+        // CRITICAL: Spawn first pipe IMMEDIATELY with random gap
+        const firstGapY = Phaser.Math.Between(180, 420);
+        this.spawnPipePair(firstGapY);
+
+        // Then start repeating timer
+        this.pipeTimer = this.time.addEvent({
             delay: this.pipeFrequency,
             callback: this.addRowOfPipes,
             callbackScope: this,
             loop: true
         });
 
-        this.episodeText.setText('Episode: ' + this.episode);
+        // UI
         this.scoreText.setText('Score: 0');
+        this.episodeText.setText('Episode: ' + this.episode);
     }
 
     getState() {
-        let pipeDist = 1.0;
-        let pipeGapY = 0.5;
-
-        // Find the closest pipe ahead of the bird
         let closestDist = Infinity;
         let closestPipe = null;
 
@@ -236,13 +215,15 @@ export class PlayScene extends Phaser.Scene {
             }
         });
 
+        let pipeDist = 1.0;
+        let pipeGapY = 0.5;
         if (closestPipe && closestPipe.gapY !== undefined) {
-            pipeDist = closestDist / 800;
+            pipeDist = Math.max(0, closestDist / 800);
             pipeGapY = closestPipe.gapY / 600;
         }
 
         const birdY = this.bird.y / 600;
-        const birdVel = Phaser.Math.Clamp(this.bird.body.velocity.y / 1000, -1, 1);
+        const birdVel = Phaser.Math.Clamp(this.bird.body.velocity.y / 1200, -1, 1);
 
         return [birdY, birdVel, pipeDist, pipeGapY];
     }
